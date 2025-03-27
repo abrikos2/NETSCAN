@@ -3,7 +3,8 @@ import queue
 from blessed import Terminal
 import unicodedata
 import time
-
+import scapy.all as scapy
+import socket
 class ColumnDisplay:
     def __init__(self, num_columns=4):
         self.term = Terminal()
@@ -63,8 +64,60 @@ class ColumnDisplay:
             self.last_redraw = now
             self.force_redraw = False
 
+    def get_hostname(self, ip):
+        try:
+            return socket.gethostbyaddr(ip)[0]
+        except (socket.herror, socket.gaierror):
+            return "Unknown"
+        
+    def measure_ping(self, ip, count=3):
+        """Измерение среднего ping до устройства (в мс)"""
+        total_time = 0
+        success = 0
+        
+        for _ in range(count):
+            start_time = time.time()
+            packet = scapy.IP(dst=ip)/scapy.ICMP()
+            response = scapy.sr1(packet, timeout=1, verbose=False)
+            
+            if response:
+                ping_time = (time.time() - start_time) * 1000  # мс
+                total_time += ping_time
+                success += 1
+        
+        return round(total_time / success, 2) if success else None
+    def scan_thread(self):
+        while self.running:
+            self.input_queue.put((0,"---IP---".center(self.col_width-3)))
+            self.input_queue.put((1,"---MAC---".center(self.col_width-3)))
+            self.input_queue.put((2,"---HOSTNAME---".center(self.col_width-3)))
+            self.input_queue.put((3,"---PING---".center(self.col_width-3)))
+            request = scapy.ARP() 
+            for i in range(0,2):
+                request.pdst = f'192.168.{i}.0/24'
+                broadcast = scapy.Ether() 
+                broadcast.dst = 'ff:ff:ff:ff:ff:ff'
+                request_broadcast = broadcast / request 
+                clients = scapy.srp(request_broadcast, timeout=1, verbose=False)[0] 
+        
+                for element in clients: 
+                    ip = element[1].psrc
+                    mac = element[1].hwsrc
+                    hostname = self.get_hostname(ip)
+                    ping = self.measure_ping(ip)
+                    if ip != None and mac != None and hostname != None and ping != None:
+                        self.input_queue.put((0,ip))
+                        self.input_queue.put((1,mac))
+                        self.input_queue.put((2,hostname))
+                        self.input_queue.put((3,f"{int(ping)} мс 📶"))
+            
+            time.sleep(60)
+            #self.redraw_screen()
+            for col in range(self.num_columns):
+                self.columns[col].clear()
+
     def display_thread(self):
-        self.redraw_screen()  
+        self.redraw_screen()
         while self.running:
             try:
                 if self.resize_flag:
@@ -90,7 +143,6 @@ class ColumnDisplay:
                 
                 if self.force_redraw:
                     self.redraw_screen()
-                
                 time.sleep(0.01)
 
             except Exception as e:
@@ -149,12 +201,15 @@ class ColumnDisplay:
         print(self.term.clear, end='', flush=True) 
         display = threading.Thread(target=self.display_thread)
         inp = threading.Thread(target=self.input_thread)
+        self.scan = threading.Thread(target=self.scan_thread)
 
         display.start()
         inp.start()
+        self.scan.start()
 
         display.join()
         inp.join()
+        self.scan.join()
         print(self.term.clear + "Программа завершена")
 
 if __name__ == "__main__":
